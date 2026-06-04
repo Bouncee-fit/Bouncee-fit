@@ -1,0 +1,22 @@
+name: shadow_boxer
+description: "MoveArcade — Shadow Boxer: a camera-based fitness boxing game built on a shared, reusable game engine."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+  flutter: '>=3.19.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Real-time camera frames
+  camera: ^0.11.0+2
+  # On-device pose estimation (no video leaves the phone)
+  google_mlkit_pose_detection: ^0.13.0
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
