@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
 void main() => runApp(const MoveArcadeApp());
@@ -136,6 +137,15 @@ class PoseService {
   bool _busy = false;
   final ValueNotifier<PoseFrame> frame = ValueNotifier(PoseFrame());
 
+  // Degrees the camera image must be turned to become upright for each
+  // possible device orientation.
+  static const _orientations = {
+    DeviceOrientation.portraitUp: 0,
+    DeviceOrientation.landscapeLeft: 90,
+    DeviceOrientation.portraitDown: 180,
+    DeviceOrientation.landscapeRight: 270,
+  };
+
   Future<void> init() async {
     _detector = PoseDetector(options: PoseDetectorOptions());
     final cameras = await availableCameras();
@@ -159,7 +169,8 @@ class PoseService {
     if (_busy) return;
     _busy = true;
     try {
-      final input = _toInputImage(image);
+      final rotation = _rotation();
+      final input = _toInputImage(image, rotation);
       if (input == null) return;
       final poses = await _detector.processImage(input);
       if (poses.isEmpty) {
@@ -167,8 +178,12 @@ class PoseService {
         return;
       }
       final lm = poses.first.landmarks;
-      final w = image.width.toDouble();
-      final h = image.height.toDouble();
+      // ML Kit reports landmarks in the upright (rotated) frame, so for a
+      // quarter-turn rotation the image width and height are swapped.
+      final quarterTurned = rotation == InputImageRotation.rotation90deg ||
+          rotation == InputImageRotation.rotation270deg;
+      final w = (quarterTurned ? image.height : image.width).toDouble();
+      final h = (quarterTurned ? image.width : image.height).toDouble();
       Offset? norm(PoseLandmarkType t) {
         final p = lm[t];
         return p == null ? null : Offset(p.x / w, p.y / h);
@@ -195,10 +210,29 @@ class PoseService {
     }
   }
 
-  InputImage? _toInputImage(CameraImage image) {
-    final rotation =
-        InputImageRotationValue.fromRawValue(_camera!.sensorOrientation) ??
-            InputImageRotation.rotation0deg;
+  // Works out how far ML Kit must rotate the frame to make it upright,
+  // combining the camera's fixed sensor mounting angle with the phone's
+  // current UI orientation. Front and back cameras combine these in
+  // opposite directions because the front sensor image is mirrored.
+  InputImageRotation _rotation() {
+    final sensor = _camera!.sensorOrientation;
+    if (Platform.isIOS) {
+      return InputImageRotationValue.fromRawValue(sensor) ??
+          InputImageRotation.rotation0deg;
+    }
+    final deviceRotation =
+        _orientations[controller!.value.deviceOrientation] ?? 0;
+    final int compensated;
+    if (_camera!.lensDirection == CameraLensDirection.front) {
+      compensated = (sensor + deviceRotation) % 360;
+    } else {
+      compensated = (sensor - deviceRotation + 360) % 360;
+    }
+    return InputImageRotationValue.fromRawValue(compensated) ??
+        InputImageRotation.rotation0deg;
+  }
+
+  InputImage? _toInputImage(CameraImage image, InputImageRotation rotation) {
     final format = InputImageFormatValue.fromRawValue(image.format.raw);
     if (format == null) return null;
     final plane = image.planes.first;
