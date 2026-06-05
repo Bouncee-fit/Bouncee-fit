@@ -1,12 +1,11 @@
 // MoveArcade — Bouncee-fit / Shadow Boxer
-// Entire app in one file so it's easy to add on GitHub.
-import 'dart:io';
+// Game + UI code. The camera + pose backend lives behind pose/pose_service.dart
+// and is selected per platform (ML Kit on mobile, MediaPipe on web).
 import 'dart:math';
-import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:flutter/services.dart';
-import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
+
+import 'pose/pose_service.dart';
 
 void main() => runApp(const MoveArcadeApp());
 
@@ -119,153 +118,6 @@ class PunchDetector {
   void reset() {
     _prevLeft = null;
     _prevRight = null;
-  }
-}
-
-// ---------------- Pose service (camera + ML Kit) ----------------
-class PoseFrame {
-  PoseFrame({
-    this.leftWrist,
-    this.rightWrist,
-    this.arms = const [],
-    this.points = const {},
-  });
-  final Offset? leftWrist;
-  final Offset? rightWrist;
-  final List<(Offset, Offset)> arms;
-
-  // All detected landmarks in normalized (0..1) upright-frame coordinates.
-  // y grows downward (0 = top of frame). Temple Dash reads hips / shoulders /
-  // ankles from here; Shadow Boxer keeps using leftWrist / rightWrist.
-  final Map<PoseLandmarkType, Offset> points;
-}
-
-class PoseService {
-  CameraController? controller;
-  late final PoseDetector _detector;
-  CameraDescription? _camera;
-  bool _busy = false;
-  final ValueNotifier<PoseFrame> frame = ValueNotifier(PoseFrame());
-
-  // Degrees the camera image must be turned to become upright for each
-  // possible device orientation.
-  static const _orientations = {
-    DeviceOrientation.portraitUp: 0,
-    DeviceOrientation.landscapeLeft: 90,
-    DeviceOrientation.portraitDown: 180,
-    DeviceOrientation.landscapeRight: 270,
-  };
-
-  Future<void> init() async {
-    _detector = PoseDetector(options: PoseDetectorOptions());
-    final cameras = await availableCameras();
-    _camera = cameras.firstWhere(
-      (c) => c.lensDirection == CameraLensDirection.front,
-      orElse: () => cameras.first,
-    );
-    controller = CameraController(
-      _camera!,
-      ResolutionPreset.medium,
-      enableAudio: false,
-      imageFormatGroup: Platform.isAndroid
-          ? ImageFormatGroup.nv21
-          : ImageFormatGroup.bgra8888,
-    );
-    await controller!.initialize();
-    await controller!.startImageStream(_process);
-  }
-
-  Future<void> _process(CameraImage image) async {
-    if (_busy) return;
-    _busy = true;
-    try {
-      final rotation = _rotation();
-      final input = _toInputImage(image, rotation);
-      if (input == null) return;
-      final poses = await _detector.processImage(input);
-      if (poses.isEmpty) {
-        frame.value = PoseFrame();
-        return;
-      }
-      final lm = poses.first.landmarks;
-      // ML Kit reports landmarks in the upright (rotated) frame, so for a
-      // quarter-turn rotation the image width and height are swapped.
-      final quarterTurned = rotation == InputImageRotation.rotation90deg ||
-          rotation == InputImageRotation.rotation270deg;
-      final w = (quarterTurned ? image.height : image.width).toDouble();
-      final h = (quarterTurned ? image.width : image.height).toDouble();
-      Offset? norm(PoseLandmarkType t) {
-        final p = lm[t];
-        return p == null ? null : Offset(p.x / w, p.y / h);
-      }
-      final pts = {for (final t in PoseLandmarkType.values) t: norm(t)};
-      final points = <PoseLandmarkType, Offset>{
-        for (final e in pts.entries)
-          if (e.value != null) e.key: e.value!,
-      };
-      final bones = <(Offset, Offset)>[];
-      void bone(PoseLandmarkType a, PoseLandmarkType b) {
-        if (pts[a] != null && pts[b] != null) bones.add((pts[a]!, pts[b]!));
-      }
-      bone(PoseLandmarkType.leftShoulder, PoseLandmarkType.leftElbow);
-      bone(PoseLandmarkType.leftElbow, PoseLandmarkType.leftWrist);
-      bone(PoseLandmarkType.rightShoulder, PoseLandmarkType.rightElbow);
-      bone(PoseLandmarkType.rightElbow, PoseLandmarkType.rightWrist);
-      bone(PoseLandmarkType.leftShoulder, PoseLandmarkType.rightShoulder);
-      frame.value = PoseFrame(
-        leftWrist: pts[PoseLandmarkType.leftWrist],
-        rightWrist: pts[PoseLandmarkType.rightWrist],
-        arms: bones,
-        points: points,
-      );
-    } catch (e) {
-      debugPrint('pose error: $e');
-    } finally {
-      _busy = false;
-    }
-  }
-
-  // Works out how far ML Kit must rotate the frame to make it upright,
-  // combining the camera's fixed sensor mounting angle with the phone's
-  // current UI orientation. Front and back cameras combine these in
-  // opposite directions because the front sensor image is mirrored.
-  InputImageRotation _rotation() {
-    final sensor = _camera!.sensorOrientation;
-    if (Platform.isIOS) {
-      return InputImageRotationValue.fromRawValue(sensor) ??
-          InputImageRotation.rotation0deg;
-    }
-    final deviceRotation =
-        _orientations[controller!.value.deviceOrientation] ?? 0;
-    final int compensated;
-    if (_camera!.lensDirection == CameraLensDirection.front) {
-      compensated = (sensor + deviceRotation) % 360;
-    } else {
-      compensated = (sensor - deviceRotation + 360) % 360;
-    }
-    return InputImageRotationValue.fromRawValue(compensated) ??
-        InputImageRotation.rotation0deg;
-  }
-
-  InputImage? _toInputImage(CameraImage image, InputImageRotation rotation) {
-    final format = InputImageFormatValue.fromRawValue(image.format.raw);
-    if (format == null) return null;
-    final plane = image.planes.first;
-    return InputImage.fromBytes(
-      bytes: plane.bytes,
-      metadata: InputImageMetadata(
-        size: Size(image.width.toDouble(), image.height.toDouble()),
-        rotation: rotation,
-        format: format,
-        bytesPerRow: plane.bytesPerRow,
-      ),
-    );
-  }
-
-  Future<void> dispose() async {
-    await controller?.stopImageStream();
-    await controller?.dispose();
-    await _detector.close();
   }
 }
 
@@ -498,7 +350,7 @@ class BodyController {
   double? _baseCenterX;
   double _cooldown = 0;
   bool _wasRising = false; // edge tracking: one rise == one jump
-  Map<PoseLandmarkType, Offset> _prev = const {};
+  Map<PoseJoint, Offset> _prev = const {};
 
   void reset() {
     _baseHipY = null;
@@ -509,7 +361,7 @@ class BodyController {
   }
 
   // ---- geometry helpers ----
-  double? _avg(Map<PoseLandmarkType, Offset> p, List<PoseLandmarkType> ts,
+  double? _avg(Map<PoseJoint, Offset> p, List<PoseJoint> ts,
       bool useY) {
     var sum = 0.0;
     var n = 0;
@@ -525,20 +377,20 @@ class BodyController {
 
   /// Vertical position of the hips (0 top .. 1 bottom), falling back to
   /// shoulders then nose when the hips aren't visible.
-  double? hipHeight(Map<PoseLandmarkType, Offset> p) =>
-      _avg(p, [PoseLandmarkType.leftHip, PoseLandmarkType.rightHip], true) ??
-      _avg(p, [PoseLandmarkType.leftShoulder, PoseLandmarkType.rightShoulder],
+  double? hipHeight(Map<PoseJoint, Offset> p) =>
+      _avg(p, [PoseJoint.leftHip, PoseJoint.rightHip], true) ??
+      _avg(p, [PoseJoint.leftShoulder, PoseJoint.rightShoulder],
           true) ??
-      _avg(p, [PoseLandmarkType.nose], true);
+      _avg(p, [PoseJoint.nose], true);
 
   /// Horizontal body center in SCREEN space (mirrored to match the selfie
   /// preview), so shifting toward the right of the screen maps to lane-right.
-  double? bodyCenterX(Map<PoseLandmarkType, Offset> p) {
+  double? bodyCenterX(Map<PoseJoint, Offset> p) {
     final x = _avg(p, [
-      PoseLandmarkType.leftShoulder,
-      PoseLandmarkType.rightShoulder,
-      PoseLandmarkType.leftHip,
-      PoseLandmarkType.rightHip,
+      PoseJoint.leftShoulder,
+      PoseJoint.rightShoulder,
+      PoseJoint.leftHip,
+      PoseJoint.rightHip,
     ], false);
     return x == null ? null : 1 - x; // mirror to match the flipped preview
   }
@@ -560,16 +412,16 @@ class BodyController {
 
   /// Average per-second motion of the tracked joints. This is what feeds the
   /// calorie model, so kcal comes from REAL effort, not the game scroll speed.
-  double _movement(Map<PoseLandmarkType, Offset> p, double dt) {
+  double _movement(Map<PoseJoint, Offset> p, double dt) {
     if (dt <= 0 || _prev.isEmpty) return 0;
     const joints = [
-      PoseLandmarkType.leftWrist,
-      PoseLandmarkType.rightWrist,
-      PoseLandmarkType.leftHip,
-      PoseLandmarkType.rightHip,
-      PoseLandmarkType.leftAnkle,
-      PoseLandmarkType.rightAnkle,
-      PoseLandmarkType.nose,
+      PoseJoint.leftWrist,
+      PoseJoint.rightWrist,
+      PoseJoint.leftHip,
+      PoseJoint.rightHip,
+      PoseJoint.leftAnkle,
+      PoseJoint.rightAnkle,
+      PoseJoint.nose,
     ];
     var sum = 0.0;
     var n = 0;
@@ -925,7 +777,7 @@ class ShadowBoxerScreen extends StatefulWidget {
 
 class _ShadowBoxerScreenState extends State<ShadowBoxerScreen>
     with SingleTickerProviderStateMixin {
-  final PoseService _pose = PoseService();
+  final PoseService _pose = createPoseService();
   final GameEngine _engine = GameEngine();
   final PunchDetector _detector = PunchDetector();
   late final CalorieEngine _calories = CalorieEngine(widget.weightKg);
@@ -1042,21 +894,10 @@ class _ShadowBoxerScreenState extends State<ShadowBoxerScreen>
                   style: TextStyle(color: Colors.white70)));
         }
         return Stack(fit: StackFit.expand, children: [
-          if (_pose.controller != null &&
-              _pose.controller!.value.isInitialized)
-            Transform.flip(
-              flipX: true,
-              child: FittedBox(
-                fit: BoxFit.cover,
-                child: SizedBox(
-                  width:
-                      _pose.controller!.value.previewSize?.height ?? _size.width,
-                  height: _pose.controller!.value.previewSize?.width ??
-                      _size.height,
-                  child: CameraPreview(_pose.controller!),
-                ),
-              ),
-            ),
+          // Live camera feed for the current platform (ML Kit camera on
+          // mobile, MediaPipe <video> on web). Fills the Stack via
+          // StackFit.expand.
+          _pose.buildPreview(context),
           Container(color: Colors.black.withOpacity(0.45)),
           CustomPaint(
             painter: BoxerPainter(
@@ -1376,7 +1217,7 @@ class TempleDashScreen extends StatefulWidget {
 
 class _TempleDashScreenState extends State<TempleDashScreen>
     with SingleTickerProviderStateMixin {
-  final PoseService _pose = PoseService();
+  final PoseService _pose = createPoseService();
   final BodyController _body = BodyController();
   late final TempleDashEngine _engine = TempleDashEngine(widget.difficulty);
   late final CalorieEngine _calories = CalorieEngine(widget.weightKg);
@@ -1481,21 +1322,10 @@ class _TempleDashScreenState extends State<TempleDashScreen>
                   style: TextStyle(color: Colors.white70)));
         }
         return Stack(fit: StackFit.expand, children: [
-          if (_pose.controller != null &&
-              _pose.controller!.value.isInitialized)
-            Transform.flip(
-              flipX: true,
-              child: FittedBox(
-                fit: BoxFit.cover,
-                child: SizedBox(
-                  width:
-                      _pose.controller!.value.previewSize?.height ?? _size.width,
-                  height: _pose.controller!.value.previewSize?.width ??
-                      _size.height,
-                  child: CameraPreview(_pose.controller!),
-                ),
-              ),
-            ),
+          // Live camera feed for the current platform (ML Kit camera on
+          // mobile, MediaPipe <video> on web). Fills the Stack via
+          // StackFit.expand.
+          _pose.buildPreview(context),
           Container(color: Colors.black.withOpacity(0.50)),
           CustomPaint(
             painter: TempleDashPainter(

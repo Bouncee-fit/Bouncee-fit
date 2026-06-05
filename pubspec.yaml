@@ -10,10 +10,12 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  # Real-time camera frames
+  # Real-time camera frames (mobile pose backend)
   camera: ^0.11.0+2
-  # On-device pose estimation (no video leaves the phone)
+  # On-device pose estimation on Android/iOS (no video leaves the phone)
   google_mlkit_pose_detection: ^0.13.0
+  # DOM + JS interop for the MediaPipe (web) pose backend
+  web: ^1.1.0
 
 dev_dependencies:
   flutter_lints: ^4.0.0
